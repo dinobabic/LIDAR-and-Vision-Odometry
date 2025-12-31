@@ -1,0 +1,6 @@
+.vscode/
+.idea/
+.DS_store
+CMakeFiles/
+CMakeCache.txt
+
