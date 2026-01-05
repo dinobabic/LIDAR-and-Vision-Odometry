@@ -17,13 +17,14 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/highgui.hpp>
 
+#include <sophus/se3.hpp>
 
 struct Features {
-    pcl::PointCloud<pcl::PointXYZ>::Ptr keypoints;
+    pcl::PointCloud<pcl::PointXYZI>::Ptr keypoints;
     pcl::PointCloud<pcl::FPFHSignature33>::Ptr descriptors;
 };
 
-std::vector<pcl::PointXYZ> read_ponint_cloud(const std::string &path)
+std::vector<pcl::PointXYZI> read_ponint_cloud(const std::string &path)
 {
     std::ifstream file(path, std::ios::binary);
 
@@ -37,18 +38,14 @@ std::vector<pcl::PointXYZ> read_ponint_cloud(const std::string &path)
 
     size_t num_points = num_bytes / (4 * sizeof(float));
 
-    std::vector<pcl::PointXYZI> points_with_intensity(num_points);
-    std::vector<pcl::PointXYZ> points(num_points);
+    std::vector<pcl::PointXYZI> points(num_points);
 
     for (size_t i = 0; i < num_points; ++i) {
-        file.read(reinterpret_cast<char*>(&points_with_intensity[i].x), sizeof(float));
-        file.read(reinterpret_cast<char*>(&points_with_intensity[i].y), sizeof(float));
-        file.read(reinterpret_cast<char*>(&points_with_intensity[i].z), sizeof(float));
-        file.read(reinterpret_cast<char*>(&points_with_intensity[i].intensity), sizeof(float));
+        file.read(reinterpret_cast<char*>(&points[i].x), sizeof(float));
+        file.read(reinterpret_cast<char*>(&points[i].y), sizeof(float));
+        file.read(reinterpret_cast<char*>(&points[i].z), sizeof(float));
+        file.read(reinterpret_cast<char*>(&points[i].intensity), sizeof(float));
     }
-
-    for (auto p : points_with_intensity)
-        points.push_back(pcl::PointXYZ(p.x, p.y, p.z));
 
     return points;
 }
@@ -68,24 +65,21 @@ std::vector<std::string> get_filenames(const std::string &path)
 }
 
 
-void downsample_cloud(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud)
+void downsample_cloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud)
 {
-    pcl::VoxelGrid<pcl::PointXYZ> sor;
+    pcl::VoxelGrid<pcl::PointXYZI> sor;
     sor.setInputCloud(cloud);
-    sor.setLeafSize(0.2f, 0.2f, 0.2f);
+    sor.setLeafSize(0.5f, 0.5f, 0.5f);
     sor.filter(*cloud);
 }
 
-std::vector<Eigen::Matrix4f> read_ground_truth(const std::string &path)
+std::vector<Eigen::Matrix4f> read_ground_truth(const std::string &path, const Sophus::SE3f &T_cam0_velo)
 {
     std::ifstream file;
     file.open(path);
 
     if (!file)
-    {
         throw std::runtime_error("Unable to read file: " + path);
-    }
-
 
     std::string line;
     std::vector<Eigen::Matrix4f> poses;
@@ -103,6 +97,15 @@ std::vector<Eigen::Matrix4f> read_ground_truth(const std::string &path)
         for (int i = 0; i < 3; ++i)
             for (int j = 0; j < 4; ++j)
                 pose(i, j) = values[i * 4 + j];
+        
+        // align axes for visualization in ros2
+        Eigen::Matrix3f R;
+        R << 
+            0, 0, 1, 
+            -1,0, 0,
+            0, -1, 0;
+        Sophus::SE3f T(R, Eigen::Vector3f::Zero());
+        pose = (T * Sophus::SE3f(pose) * T_cam0_velo).matrix(); // convert ground truth pose expressed in the left camera frame to the lidar frame
 
         poses.push_back(pose);
     }
@@ -110,26 +113,26 @@ std::vector<Eigen::Matrix4f> read_ground_truth(const std::string &path)
     return poses;
 }
 
-Features compute_feature_descriptors(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud)
+Features compute_feature_descriptors(const pcl::PointCloud<pcl::PointXYZI>::Ptr cloud)
 {
     // compute intrinsic shape signatures keypoints
-    pcl::ISSKeypoint3D<pcl::PointXYZ, pcl::PointXYZ> iss;
+    pcl::ISSKeypoint3D<pcl::PointXYZI, pcl::PointXYZI> iss;
     iss.setInputCloud(cloud);
-    iss.setSalientRadius(0.5f);
-    iss.setNonMaxRadius(0.5f);
+    iss.setSalientRadius(1.0f);
+    iss.setNonMaxRadius(1.2f);
     iss.setThreshold21(0.975);
     iss.setThreshold32(0.975);
     iss.setMinNeighbors(5);
     
-    pcl::PointCloud<pcl::PointXYZ>::Ptr keypoints(new pcl::PointCloud<pcl::PointXYZ>());
+    pcl::PointCloud<pcl::PointXYZI>::Ptr keypoints(new pcl::PointCloud<pcl::PointXYZI>());
     iss.compute(*keypoints);
 
     // compute feature descriptor for each keypoint
     // compute surface normals
-    pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> ne;
+    pcl::NormalEstimation<pcl::PointXYZI, pcl::Normal> ne;
     ne.setInputCloud(cloud);
 
-    pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>());
+    pcl::search::KdTree<pcl::PointXYZI>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZI>());
     ne.setSearchMethod(tree);
 
     pcl::PointCloud<pcl::Normal>::Ptr normals(new pcl::PointCloud<pcl::Normal>());
@@ -137,12 +140,12 @@ Features compute_feature_descriptors(const pcl::PointCloud<pcl::PointXYZ>::Ptr c
     ne.compute(*normals);
 
     // compute fpfh feature descriptor for each keypoint
-    pcl::FPFHEstimation<pcl::PointXYZ, pcl::Normal, pcl::FPFHSignature33> fpfh;
+    pcl::FPFHEstimation<pcl::PointXYZI, pcl::Normal, pcl::FPFHSignature33> fpfh;
     fpfh.setInputCloud(keypoints);
     fpfh.setInputNormals(normals);
     fpfh.setSearchSurface(cloud);
     fpfh.setSearchMethod(tree);
-    fpfh.setRadiusSearch(0.8);
+    fpfh.setRadiusSearch(2.5);
 
     pcl::PointCloud<pcl::FPFHSignature33>::Ptr descriptors(new pcl::PointCloud<pcl::FPFHSignature33>());
     fpfh.compute(*descriptors);

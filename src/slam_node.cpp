@@ -46,13 +46,13 @@ public:
               0, 0,  1,  0;
 
         slam = SLAM(K, P0, P1, baseline);
-        total_estimated_pose = Eigen::Matrix4f::Identity();
-        T = Sophus::SE3f();
 
         // read file names and ground truth poses
         image_names = get_filenames(dataset_path + "/image_0");
         ground_truth_poses = read_ground_truth("/media/dino/T7/data_odometry_poses/dataset/poses/00.txt");
         int N = image_names.size();
+
+        estimated_poses.push_back(Sophus::SE3f()); // initial pose is identity
 
         // load first stereo pair
         stereo_pair_curr = load_stereo_pair(dataset_path, image_names[0]);
@@ -61,14 +61,16 @@ public:
             stereo_pair_prev = stereo_pair_curr;
             stereo_pair_curr = load_stereo_pair(dataset_path, image_names[i]);
 
-            std::vector<Eigen::Vector3f> points3D;
-            slam.vision_odometry(stereo_pair_prev, stereo_pair_curr, T, points3D);
-            estimated_global_poses.push_back(T.matrix());
+            auto T = estimated_poses.back();
+            std::vector<Eigen::Vector3f> _points3D;
+            slam.vision_odometry(stereo_pair_prev, stereo_pair_curr, T, _points3D);
+            estimated_poses.push_back(T);
 
             auto stamp = this->get_clock()->now();
-            publish_transform(T.matrix(), "map", "camera_frame", stamp);
-            publish_trajectory(stamp, estimated_traj_pub, estimated_global_poses, estimated_global_poses.size(), std::vector<float>{1.0, 0.0, 0.0});
+            publish_transform(estimated_poses.back().matrix(), "map", "camera_frame", stamp);
+            publish_trajectory(stamp, estimated_traj_pub, estimated_poses, estimated_poses.size(), std::vector<float>{1.0, 0.0, 0.0});
             publish_trajectory(stamp, ground_truth_traj_pub, ground_truth_poses, i, std::vector<float>{0.0, 0.0, 1.0});
+            //point_cloud_pub->publish(point_cloud_to_message(points3D));
         }
     }
 
@@ -86,12 +88,10 @@ private:
 
     SLAM slam;
     Eigen::Matrix<float, 3, 4>  P0, P1; // projection matrices of the left and right camera
-    Sophus::SE3f T;
     Eigen::Matrix3f K; // calibration matrix of both cameras
-    std::vector<Eigen::Matrix4f> estimated_relative_poses;
-    std::vector<Eigen::Matrix4f> estimated_global_poses;
-    Eigen::Matrix4f total_estimated_pose;
-    std::vector<Eigen::Matrix4f> ground_truth_poses;
+    std::vector<Eigen::Vector3f> points3D;
+    std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>> estimated_poses;
+    std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>> ground_truth_poses;
 
 
     sensor_msgs::msg::PointCloud2 point_cloud_to_message(const std::vector<Eigen::Vector3f>& point_cloud)
@@ -99,7 +99,7 @@ private:
         sensor_msgs::msg::PointCloud2 msg;
         msg.height = 1;
         msg.width = point_cloud.size();
-        msg.header.frame_id = "camera_frame"; // points are expressed in lidars local coordinate frame
+        msg.header.frame_id = "map"; // points are expressed in lidars local coordinate frame
         msg.header.stamp = this->get_clock()->now();
 
         sensor_msgs::PointCloud2Modifier modifier(msg);
@@ -152,7 +152,7 @@ private:
 
     void publish_trajectory(const rclcpp::Time &stamp, 
                             rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr publisher, 
-                            const std::vector<Eigen::Matrix4f> &poses,
+                            const std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>> &poses,
                             const int N,
                             const std::vector<float> &color)
     {
@@ -171,7 +171,7 @@ private:
 
         for (auto i = 0; i < N; i++)
         {
-            auto T = poses[i];
+            auto T = poses[i].matrix();
             geometry_msgs::msg::Point p;
             p.x = T(0, 3);
             p.y = T(1, 3);

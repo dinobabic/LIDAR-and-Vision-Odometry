@@ -18,9 +18,13 @@
 class ICP 
 {
 private:
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloudify(const std::vector<pcl::PointXYZ> &points)
+
+    
+public: 
+
+    pcl::PointCloud<pcl::PointXYZI>::Ptr cloudify(const std::vector<pcl::PointXYZI> &points)
     {
-        pcl::PointCloud<pcl::PointXYZ>::Ptr point_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZI>::Ptr point_cloud(new pcl::PointCloud<pcl::PointXYZI>);
         
         for (const auto &p : points)
             point_cloud->points.push_back(p);
@@ -31,9 +35,6 @@ private:
 
         return point_cloud;
     }
-
-    
-public: 
 
     Eigen::Matrix4f ransac(const std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>> &closest_points, 
                             int iters,
@@ -65,7 +66,7 @@ public:
             // sample correspondances to build initial model
             std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>> sample;
             sample.reserve(10);
-            std::sample(sampled_closest_points.begin(), sampled_closest_points.end(), std::back_inserter(sample), 10, g);
+            std::sample(sampled_closest_points.begin(), sampled_closest_points.end(), std::back_inserter(sample), 3, g);
             
             // compute transformation
             Eigen::Matrix4f T = solve_icp(sample);
@@ -87,8 +88,6 @@ public:
             if (current_inliers.size() > best_inliers.size())
                 best_inliers = current_inliers;
         }
-
-        std::cout << "Number of inliers: " << best_inliers.size() << std::endl;
 
         if (best_inliers.empty()) {
             std::cerr << "RANSAC failed: no inliers found." << std::endl;
@@ -137,12 +136,12 @@ public:
         Eigen::JacobiSVD<Eigen::Matrix3f> svd(H, Eigen::ComputeFullU | Eigen::ComputeFullV);
         Eigen::Matrix3f U = svd.matrixU();
         Eigen::Matrix3f V = svd.matrixV();
-        Eigen::Matrix3f R = V * U.transpose();
+        Eigen::Matrix3f R = U*V.transpose();
         
         if (R.determinant() < 0)
         {
             V.col(2) *= -1;
-            R = V * U.transpose();
+            R = U*V.transpose();
         }
 
         Eigen::Vector3f t = centroid2 - R*centroid1;
@@ -154,70 +153,44 @@ public:
         return T;
     }
 
-    std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>> find_correspondances_features_based(const std::vector<pcl::PointXYZ> &points_1, 
-                          const std::vector<pcl::PointXYZ> &points_2,
-                          bool downsample)
+    std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>> find_correspondances_features_based(
+            pcl::PointCloud<pcl::PointXYZI>::Ptr point_cloud_1, 
+            pcl::PointCloud<pcl::PointXYZI>::Ptr point_cloud_2)
     {
-        // cloudify points
-        auto point_cloud_1 = cloudify(points_1);
-        auto point_cloud_2 = cloudify(points_2);
-
-        // downsample point clouds
-        if (downsample) 
-        {
-            downsample_cloud(point_cloud_1);
-            downsample_cloud(point_cloud_2);
-        }
-
         auto features_1 = compute_feature_descriptors(point_cloud_1);
         auto features_2 = compute_feature_descriptors(point_cloud_2);
 
         pcl::KdTreeFLANN<pcl::FPFHSignature33> matchTree;
         matchTree.setInputCloud(features_2.descriptors);
 
-        std::vector<pcl::Correspondence> correspondences;
+        std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>>matched_points;
 
         for (size_t i = 0; i < features_1.descriptors->size(); ++i) {
-            std::vector<int> neighIdx(1);
-            std::vector<float> neighDist(1);
+            std::vector<int> neighIdx(2);
+            std::vector<float> neighDist(2);
+            
+            if (matchTree.nearestKSearch(features_1.descriptors->at(i), 2, neighIdx, neighDist) >= 2) {
+                float dist1 = std::sqrt(neighDist[0]);
+                float dist2 = std::sqrt(neighDist[1]);
 
-            if (matchTree.nearestKSearch(features_1.descriptors->at(i), 1, neighIdx, neighDist) > 0) {
-                pcl::Correspondence corr;
-                corr.index_query = i;              
-                corr.index_match = neighIdx[0];    
-                corr.distance = neighDist[0];      
-                correspondences.push_back(corr);
+                if (dist1 < 0.75f*dist2) {
+                    const pcl::PointXYZI &p1 = features_1.keypoints->points[i];
+                    const pcl::PointXYZI &p2 = features_2.keypoints->points[neighIdx[0]];
+                    matched_points.emplace_back(Eigen::Vector3f(p1.x, p1.y, p1.z), 
+                                                Eigen::Vector3f(p2.x, p2.y, p2.z));
+                }
             }
         }
 
-        std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>>matched_points;
-        for (const auto &corr : correspondences) 
-        {
-            const pcl::PointXYZ &p1 = features_1.keypoints->points[corr.index_query];
-            const pcl::PointXYZ &p2 = features_2.keypoints->points[corr.index_match];
-            matched_points.emplace_back(Eigen::Vector3f(p1.x, p1.y, p1.z), Eigen::Vector3f(p2.x, p2.y, p2.z));
-        }
-
-        std::cout << "The number of matched points: " << matched_points.size() << std::endl;
+        std::cout << "Number of matched points: " << matched_points.size() << std::endl;
         return matched_points;
     }
 
-    std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>> find_correspondances_euclidean(const std::vector<pcl::PointXYZ> &points_1, 
-              const std::vector<pcl::PointXYZ> &points_2,
-              Eigen::Matrix3f R, Eigen::Vector3f t,
-              bool downsample)
+    std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>> find_correspondances_euclidean(
+            pcl::PointCloud<pcl::PointXYZI>::Ptr point_cloud_1,
+            pcl::PointCloud<pcl::PointXYZI>::Ptr point_cloud_2,
+            Eigen::Matrix3f R, Eigen::Vector3f t)
     {  
-        // cloudify points
-        auto point_cloud_1 = cloudify(points_1);
-        auto point_cloud_2 = cloudify(points_2);
-
-        // downsample point clouds
-        if (downsample) 
-        {
-            downsample_cloud(point_cloud_1);
-            downsample_cloud(point_cloud_2);
-        }
-
         // find closest points
         std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>> closest_points;
 
@@ -249,28 +222,19 @@ public:
         return closest_points;
     }
 
-    std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>> find_correspondances_kdtree(const std::vector<pcl::PointXYZ> &points_1, 
-              const std::vector<pcl::PointXYZ> &points_2,
-              Eigen::Matrix3f R, Eigen::Vector3f t,
-              bool downsample) 
+    std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>> find_correspondances_kdtree(
+            pcl::PointCloud<pcl::PointXYZI>::Ptr point_cloud_1, 
+            pcl::PointCloud<pcl::PointXYZI>::Ptr point_cloud_2,
+            Eigen::Matrix3f R, Eigen::Vector3f t) 
     {
-        // cloudify points
-        auto point_cloud_1 = cloudify(points_1);
-        auto point_cloud_2 = cloudify(points_2);
-
-        // downsample point clouds
-        if (downsample) 
-        {
-            downsample_cloud(point_cloud_1);
-            downsample_cloud(point_cloud_2);
-        }
-
         // initialize kd tree from the second point cloud
-        pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
+        pcl::KdTreeFLANN<pcl::PointXYZI> kdtree;
         kdtree.setInputCloud(point_cloud_2);
 
         // find nearest neighbors
         std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>> closest_points;
+        float avg_squared_dist = 0.0;
+        int points_count = 0;
 
         for (auto p1 : point_cloud_1->points) 
         {  
@@ -282,15 +246,21 @@ public:
             Eigen::Vector3f pt1(p1.x, p1.y, p1.z);
             Eigen::Vector3f pt1_transformed = R*pt1 + t;
 
-            pcl::PointXYZ p1_transformed(pt1_transformed.x(), pt1_transformed.y(), pt1_transformed.z());
+            pcl::PointXYZI p1_transformed(pt1_transformed.x(), pt1_transformed.y(), pt1_transformed.z(), p1.intensity);
             kdtree.nearestKSearch(p1_transformed, K, point_idx, squared_distance);
             
-            if (squared_distance[0] < 1.0f)
-            {
-                pcl::PointXYZ closest_point = (*point_cloud_2)[point_idx[0]];
+            avg_squared_dist += squared_distance[0];
+            points_count++;
+
+            // if (squared_distance[0] < 1.0f)
+            // {
+                pcl::PointXYZI closest_point = (*point_cloud_2)[point_idx[0]];
                 closest_points.push_back(std::make_pair(pt1, Eigen::Vector3f(closest_point.x, closest_point.y, closest_point.z))); 
-            }
+            //}
         }
+
+        avg_squared_dist /= points_count;
+        std::cout << "Average distance of points between is: " << avg_squared_dist << std::endl;
         
         return closest_points;
     }

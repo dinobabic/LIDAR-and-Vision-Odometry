@@ -13,112 +13,140 @@
 #include <string>
 #include <chrono>
 
+#include <pcl/registration/icp.h>
+
 class ICPNode : public rclcpp::Node
 {
 public:
-    ICPNode() : Node("point_cloud_node"), index(0)
+    ICPNode() : Node("point_cloud_node")
     {
         point_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("points", 10);
         estimated_traj_pub = this->create_publisher<visualization_msgs::msg::Marker>("estimated_trajectory", 10);
+        pcl_estimated_traj_pub = this->create_publisher<visualization_msgs::msg::Marker>("pcl_estimated_trajectory", 10);
         ground_truth_traj_pub = this->create_publisher<visualization_msgs::msg::Marker>("ground_truth_trajectory", 10);
-
         tf_broadcaster = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
-        total_estimated_pose = Eigen::Matrix4f::Identity();
+        // initial pose is identity
+        T_wp = Sophus::SE3f();
 
-        point_clouds_names = get_filenames(
-            "/media/dino/T7/data_odometry_lidar/sequences/00/velodyne"
-        );
+        Eigen::Matrix4f T_cam0_velo_eigen; // transformation matrix that transforms from the lidar frame to the camera_0 frame
+        T_cam0_velo_eigen << 
+        4.276802e-04, -9.999672e-01, -8.084492e-03, -1.198460e-02,
+        -7.210627e-03,  8.081198e-03, -9.999413e-01, -5.403985e-02,
+        9.999739e-01,  4.859486e-04, -7.206934e-03, -2.921969e-01,
+        0, 0, 0, 1;
+
+        Sophus::SE3f T_cam0_velo(T_cam0_velo_eigen);
+
+        point_clouds_names = get_filenames("/media/dino/T7/data_odometry_lidar/sequences/00/velodyne");
 
         // read ground truth poses
-        ground_truth_poses = read_ground_truth("/media/dino/T7/data_odometry_poses/dataset/poses/00.txt");
+        ground_truth_poses = read_ground_truth("/media/dino/T7/data_odometry_poses/dataset/poses/00.txt", T_cam0_velo);
 
-        timer = this->create_wall_timer(
-            std::chrono::milliseconds(100),
-            [this]()
-            {   
-                point_cloud_prev = point_cloud_next;
-                point_cloud_next = read_ponint_cloud(point_clouds_names[index++]);
-                auto stamp = this->get_clock()->now();
+        point_cloud_next = read_ponint_cloud(point_clouds_names[0]);
+        for (int i = 0; i < point_clouds_names.size() && rclcpp::ok(); i++)
+        {   
+            point_cloud_prev = point_cloud_next;
+            point_cloud_next = read_ponint_cloud(point_clouds_names[i]);
+            auto stamp = this->get_clock()->now();
 
-                if (point_cloud_next.size() > 0 && point_cloud_prev.size() > 0)
-                {
-                    const int icp_iterations = 5;
+            // cloudify points
+            auto point_cloud_1 = icp.cloudify(point_cloud_prev);
+            auto point_cloud_2 = icp.cloudify(point_cloud_next);
 
-                    Eigen::Matrix4f T;
-                    
-                    // initial estimate for transformation
-                    Eigen::Matrix3f R = Eigen::Matrix3f::Identity();
-                    Eigen::Vector3f t = Eigen::Vector3f::Zero();
-                    if (estimated_relative_poses.size() > 0)
-                    {
-                        auto T = estimated_relative_poses.back();
-                        R = T.block<3, 3>(0, 0);
-                        t = T.block<3, 1>(0, 3);
-                    }
+            // downsample point clouds
+            downsample_cloud(point_cloud_1);
+            downsample_cloud(point_cloud_2);
 
-                    for (int iter = 0; iter < icp_iterations; ++iter)
-                        {
-                        // find closest points
-                        auto closest_points = icp.find_correspondances_kdtree(
-                            point_cloud_prev,
-                            point_cloud_next,
-                            R,
-                            t,
-                            true
-                        );
+            // feature based icp - no need to iterate
+            // auto matched_points = icp.find_correspondances_features_based(
+            //     point_cloud_1,
+            //     point_cloud_2
+            // );
 
-                        //icp.find_correspondances_features_based(point_cloud_prev, point_cloud_next, true);
+            // auto T = icp.ransac(matched_points, 50, 0.25f);
 
-                        // estimate the relative transformation 
-                        float threshold = 0.02;
-                        T = icp.ransac(closest_points, 100, threshold);
+            pcl::IterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI> icp_pcl;
+            icp_pcl.setInputSource(point_cloud_1);
+            icp_pcl.setInputTarget(point_cloud_2);
+            pcl::PointCloud<pcl::PointXYZI> aligned;
+            icp_pcl.align(aligned);
+            Eigen::Matrix4f T_pcl = icp_pcl.getFinalTransformation();
+            T_wp_pcl *= Sophus::SE3f(T_pcl).inverse();
+            pcl_estimated_global_poses.push_back(T_wp_pcl.matrix());
 
-                        R = T.block<3, 3>(0, 0);
-                        t = T.block<3, 1>(0, 3);
-                    }
-
-                    estimated_relative_poses.push_back(T);
-                    total_estimated_pose *= T;
-                    estimated_global_poses.push_back(total_estimated_pose);
-
-                    std::cout << "Transformation matrix: \n" << T << std::endl;
-
-                    publish_transform(total_estimated_pose, "map", "lidar_frame", stamp);
-                    publish_trajectory(stamp, estimated_traj_pub, estimated_global_poses, estimated_global_poses.size(), std::vector<float>{1.0, 0.0, 0.0});
-                    publish_trajectory(stamp, ground_truth_traj_pub, ground_truth_poses, estimated_global_poses.size(), std::vector<float>{0.0, 0.0, 1.0});
-                }
-
-                sensor_msgs::msg::PointCloud2 msg =
-                    point_cloud_to_message(point_cloud_next);
-
-                msg.header.stamp = stamp;
-                point_cloud_pub->publish(msg);
+            const int icp_iterations = 3;
+            Eigen::Matrix4f T;
+            
+            // initial estimate for transformation
+            Eigen::Matrix3f R = Eigen::Matrix3f::Identity();
+            Eigen::Vector3f t = Eigen::Vector3f::Zero();
+            if (estimated_relative_poses.size() > 0)
+            {
+                auto T = estimated_relative_poses.back();
+                R = T.block<3, 3>(0, 0);
+                t = T.block<3, 1>(0, 3);
             }
-        );
+
+            for (int iter = 0; iter < icp_iterations; ++iter)
+                {
+                // find closest points
+                auto closest_points = icp.find_correspondances_kdtree(
+                    point_cloud_1,
+                    point_cloud_2,
+                    R, t
+                );
+
+                // estimate the relative transformation
+                T = icp.ransac(closest_points, 50, 0.25f);
+                //T = icp.solve_icp(closest_points);
+                R = T.block<3, 3>(0, 0);
+                t = T.block<3, 1>(0, 3);
+            }
+
+
+            Sophus::SE3f T_curr_prev(T); // transformation from the prev to the curr point cloud
+            estimated_relative_poses.push_back(T_curr_prev.matrix());
+            T_wp = T_wp * T_curr_prev.inverse();
+            estimated_global_poses.push_back(T_wp.matrix());
+
+            std::cout << "PCL estimated transformation matrix: \n" << T_wp_pcl.matrix3x4() << std::endl;
+            std::cout << "Estimated transformation matrix: \n" << T_wp.matrix3x4() << std::endl;
+            std::cout << "Ground truth transformation matrix: \n" << ground_truth_poses[i] << std::endl;
+
+            publish_transform(T_wp.matrix(), "map", "lidar_frame", stamp);
+            publish_trajectory(stamp, estimated_traj_pub, estimated_global_poses, estimated_global_poses.size(), std::vector<float>{1.0, 0.0, 0.0});
+            publish_trajectory(stamp, ground_truth_traj_pub, ground_truth_poses, estimated_global_poses.size(), std::vector<float>{0.0, 0.0, 1.0});
+            publish_trajectory(stamp, pcl_estimated_traj_pub, pcl_estimated_global_poses, pcl_estimated_global_poses.size(), std::vector<float>{0.0, 1.0, 0.0});
+        
+
+        sensor_msgs::msg::PointCloud2 msg = point_cloud_to_message(point_cloud_next);
+        msg.header.stamp = stamp;
+        point_cloud_pub->publish(msg);
+        }
     }
 
 private:
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr point_cloud_pub;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr estimated_traj_pub;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr pcl_estimated_traj_pub;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr ground_truth_traj_pub;
-    rclcpp::TimerBase::SharedPtr timer;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster;
 
     std::vector<std::string> point_clouds_names;
-    int index;
 
-    std::vector<pcl::PointXYZ> point_cloud_prev;
-    std::vector<pcl::PointXYZ> point_cloud_next;
+    std::vector<pcl::PointXYZI> point_cloud_prev;
+    std::vector<pcl::PointXYZI> point_cloud_next;
 
     ICP icp;
     std::vector<Eigen::Matrix4f> estimated_relative_poses;
     std::vector<Eigen::Matrix4f> estimated_global_poses;
-    Eigen::Matrix4f total_estimated_pose;
+    std::vector<Eigen::Matrix4f> pcl_estimated_global_poses;
+    Sophus::SE3f T_wp; // total estimated pose of the last processed point cloud in the world frame
+    Sophus::SE3f T_wp_pcl; 
     std::vector<Eigen::Matrix4f> ground_truth_poses;
 
-
-    sensor_msgs::msg::PointCloud2 point_cloud_to_message(const std::vector<pcl::PointXYZ>& point_cloud)
+    sensor_msgs::msg::PointCloud2 point_cloud_to_message(const std::vector<pcl::PointXYZI>& point_cloud)
     {
         sensor_msgs::msg::PointCloud2 msg;
         msg.height = 1;
@@ -146,7 +174,7 @@ private:
             *it_x = p.x;
             *it_y = p.y;
             *it_z = p.z;
-            *it_i = 1.0;//p.intensity;
+            *it_i = p.intensity;
             ++it_x; ++it_y; ++it_z; ++it_i;
         }
 
