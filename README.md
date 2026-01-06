@@ -1,7 +1,7 @@
 # LIDAR and Vision Odometry
 
 <p align="center">
-  <img src="images/trajectory.png" width="600">
+  <img src="images/lidar_trajectory.png" width="600">
    <br>
   <em>Estimated (red) vs. ground truth (blue) trajectory on KITTI sequence 00 using LIDAR point clouds</em>
 </p>
