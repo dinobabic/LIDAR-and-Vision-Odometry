@@ -1,36 +1,92 @@
 # LIDAR and Vision Odometry
 
-This repository contains code for LIDAR and Stereo Vision based odometry. Pipeline for evaluating alogirthms on the KITTI dataset has been implemented. Both implementations are wrapped in the ROS2 nodes for the visualization purposes in
-the Rviz2 visualization tool. 
+This repository contains implementations of LIDAR-based and stereo vision–based odometry. A complete evaluation pipeline for the KITTI dataset is provided. Both approaches are wrapped in ROS2 nodes to enable visualization of trajectories and point clouds in **RViz2**.
 
-## Running the code
-Create an empty directory and inside of it create directory src. In the src folder clone this repository. In the parent directory execute command colcon build, which will build ROS2 package from the cloned repo. Execute command source install/local_setup.bash.
-Now you should be able to execute command ros2 run lidar_vo lidar_node or ros2 run lidar_vo slam_node, which will execute LIDAR and Stereo Vision based odometry respectively. Make sure to update paths to the KITTI dataset, where you store any of the sequences and ground truth data.
+## Features
 
-## Implementation
-For the LIDAR based odometry, I implemented Iterative Closest Point (ICP) algorithm. Pipeline is as follows:
-  - read two consecutive point clouds and store them as pcl::PointCloud data structures
-  - downsample point clouds for efficiency
-  - set initial transformation between two point clouds either as an identity transform or as the previously estimated transform between two previous point clouds
-  - iterate:
-      - determine correspondances between two point clouds - slow Euclidean distance based implementation or efficient implementation based on KDTree have been implemented
-      - execute 50 iterations of RANSAC algorithm
-  - concatenate estimated transform to obtain global pose of the vehicle
-  - publish estimated trajectory, ground truth trajectory and transformed point cloud
+- LIDAR odometry based on Iterative Closest Point (ICP)
+- Stereo vision odometry based on feature matching and PnP
+- Evaluation on the KITTI dataset
+- ROS2 integration with RViz2 visualization
+- Ground truth and estimated trajectory comparison
 
-To implement Stereo Vision odometry, I utilized stereo pairs provided in the KITTI dataset. Pose between two consecutive stereo pairs is computed using PnP algorithm. Pipeline is as follows:
-  - read two consecutive stereo pairs
-  - detect and match features between the left images in stereo pairs
-  - match features between the earlier stereo pair (only that have match in the left image in the next stereo pair)
-  - filter stereo matches - keep only those that have positive disparity and have same y coordinate (up to threhsold) - images have been rectified (horizontal epipolar lines)
-  - drop temporal matches for which we no longer have correspondances in the stereo matches
-  - triangulate stereo matches in the eralier stereo pair - this is possible because we know pose of the right camera relative to the left camera
-  - we know have 3D-2D correspondances - perform PnP algorithm - result is transformation from the 3D points to the image plane
-  - concatenate the inverse of the obtain transformation to obtain pose of the next stereo pair in the global coordinate frame
+## Running the Code
+
+Create a workspace and clone the repository:
+
+```bash
+mkdir -p ws/src
+cd ws/src
+git clone <this-repository>
+```
+
+Build the ROS2 package:
+
+```bash
+cd ..
+colcon build
+source install/local_setup.bash
+```
+
+Run the nodes:
+
+```bash
+ros2 run lidar_vo lidar_node
+```
+
+or
+
+```bash
+ros2 run lidar_vo slam_node
+```
+
+The first command runs the LIDAR-based odometry, while the second runs the stereo vision–based odometry.
+
+> **Note**  
+> Before running the code, update the paths to the KITTI dataset (sequences and ground truth files) in the configuration or source files.
+
+## Implementation Details
+
+### LIDAR Odometry
+
+LIDAR odometry is implemented using the Iterative Closest Point (ICP) algorithm. The processing pipeline is:
+
+1. Read two consecutive point clouds and store them as `pcl::PointCloud` objects  
+2. Downsample the point clouds to improve efficiency  
+3. Initialize the relative transformation:
+   - Identity transform, or  
+   - Previously estimated transformation  
+4. Iteratively refine the alignment:
+   - Compute point correspondences  
+     - Naive Euclidean distance–based method  
+     - KD-tree–based nearest neighbor search  
+   - Perform 50 RANSAC iterations for robust alignment  
+5. Concatenate the estimated transformation to obtain the global vehicle pose  
+6. Publish:
+   - Estimated trajectory  
+   - Ground truth trajectory  
+   - Aligned point cloud  
+
+### Stereo Vision Odometry
+
+Stereo vision odometry uses rectified stereo image pairs from the KITTI dataset. The relative pose between consecutive frames is estimated using a PnP formulation.
+
+The pipeline is as follows:
+
+1. Read two consecutive stereo pairs  
+2. Detect and match features between the left images of consecutive frames  
+3. Keep only features that are successfully matched temporally  
+4. Match features between left and right images of the earlier stereo pair  
+5. Filter stereo matches:
+   - Positive disparity  
+   - Similar y-coordinates (horizontal epipolar constraint)  
+6. Remove temporal matches without valid stereo correspondences  
+7. Triangulate 3D points from stereo matches using known left–right camera calibration  
+8. Form 3D–2D correspondences and solve the PnP problem  
+9. Concatenate the inverse of the estimated transformation to recover the pose in the global coordinate frame  
 
 ## TODO
-- Sliding window bundle adjustment has been implemented using the g2o library, but it still has to be connected with the existing vision odometry pipeline.
-- Implement loop closure detection using bag of words approach.
-- When loop closure is detected, apply pose graph optimization algorithm to get more consistent trajectory.
 
-## Visual examples
+- Integrate sliding window bundle adjustment (already implemented using **g2o**) into the vision odometry pipeline  
+- Implement loop closure detection using a bag-of-words approach  
+- Apply pose graph optimization after loop closure detection to improve global trajectory consistency  
