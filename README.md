@@ -1,5 +1,11 @@
 # LIDAR and Vision Odometry
 
+<p align="center">
+  <img src="images/trajectory.png" width="600">
+   <br>
+  <em>Estimated (red) vs. ground truth (blue) trajectory on KITTI sequence 00 using LIDAR point clouds</em>
+</p>
+
 This repository contains implementations of LIDAR-based and stereo vision–based odometry. A complete evaluation pipeline for the KITTI dataset is provided. Both approaches are wrapped in ROS2 nodes to enable visualization of trajectories and point clouds in **RViz2**.
 
 ## Features
