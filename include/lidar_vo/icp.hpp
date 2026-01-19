@@ -16,10 +16,7 @@
 #include "lidar_vo/utils_icp.hpp"
 
 class ICP 
-{
-private:
-
-    
+{    
 public: 
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloudify(const std::vector<pcl::PointXYZI> &points)
@@ -65,7 +62,7 @@ public:
         {
             // sample correspondances to build initial model
             std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>> sample;
-            sample.reserve(10);
+            sample.reserve(3);
             std::sample(sampled_closest_points.begin(), sampled_closest_points.end(), std::back_inserter(sample), 3, g);
             
             // compute transformation
@@ -252,11 +249,8 @@ public:
             avg_squared_dist += squared_distance[0];
             points_count++;
 
-            // if (squared_distance[0] < 1.0f)
-            // {
-                pcl::PointXYZI closest_point = (*point_cloud_2)[point_idx[0]];
-                closest_points.push_back(std::make_pair(pt1, Eigen::Vector3f(closest_point.x, closest_point.y, closest_point.z))); 
-            //}
+            pcl::PointXYZI closest_point = (*point_cloud_2)[point_idx[0]];
+            closest_points.push_back(std::make_pair(pt1, Eigen::Vector3f(closest_point.x, closest_point.y, closest_point.z))); 
         }
 
         avg_squared_dist /= points_count;

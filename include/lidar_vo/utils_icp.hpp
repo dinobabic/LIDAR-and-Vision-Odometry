@@ -75,6 +75,8 @@ void downsample_cloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud)
 
 std::vector<Eigen::Matrix4f> read_ground_truth(const std::string &path, const Sophus::SE3f &T_cam0_velo)
 {
+    Sophus::SE3f T_velo_cam0 = T_cam0_velo.inverse();
+
     std::ifstream file;
     file.open(path);
 
@@ -97,20 +99,42 @@ std::vector<Eigen::Matrix4f> read_ground_truth(const std::string &path, const So
         for (int i = 0; i < 3; ++i)
             for (int j = 0; j < 4; ++j)
                 pose(i, j) = values[i * 4 + j];
-        
-        // align axes for visualization in ros2
-        Eigen::Matrix3f R;
-        R << 
-            0, 0, 1, 
-            -1,0, 0,
-            0, -1, 0;
-        Sophus::SE3f T(R, Eigen::Vector3f::Zero());
-        pose = (T * Sophus::SE3f(pose) * T_cam0_velo).matrix(); // convert ground truth pose expressed in the left camera frame to the lidar frame
 
-        poses.push_back(pose);
+        Eigen::Matrix4f corrected_pose = (T_velo_cam0 * Sophus::SE3f(pose) * T_cam0_velo).matrix();
+        poses.push_back(corrected_pose);
     }
 
     return poses;
+}
+
+void store_estimated_trajectory(
+    const std::vector<Eigen::Matrix4f>& poses_lidar_world, 
+    const Sophus::SE3f& T_cam0_velo) 
+{
+    std::vector<Eigen::Matrix4f> poses_cam0_world;
+    poses_cam0_world.reserve(poses_lidar_world.size());
+
+    Eigen::Matrix4f T_cv = T_cam0_velo.matrix();
+    Eigen::Matrix4f T_vc = T_cam0_velo.inverse().matrix();
+
+    for (const auto& T_w_velo : poses_lidar_world)
+    {
+        Eigen::Matrix4f T_w_cam0 = T_cv * T_w_velo * T_vc;
+        poses_cam0_world.push_back(T_w_cam0);
+    }
+
+    std::ofstream out("/home/dino/3dvid/lidar_visual_odometry_ws/src/lidar_vo/estimates/00_estimate_lidar.txt");
+    if (!out.is_open()) return;
+
+    for (const auto& T_w_cam0 : poses_cam0_world)
+    {
+        out << std::fixed << std::setprecision(9);
+        out << T_w_cam0(0,0) << " " << T_w_cam0(0,1) << " " << T_w_cam0(0,2) << " " << T_w_cam0(0,3) << " "
+            << T_w_cam0(1,0) << " " << T_w_cam0(1,1) << " " << T_w_cam0(1,2) << " " << T_w_cam0(1,3) << " "
+            << T_w_cam0(2,0) << " " << T_w_cam0(2,1) << " " << T_w_cam0(2,2) << " " << T_w_cam0(2,3)
+            << "\n";
+    }
+    out.close();
 }
 
 Features compute_feature_descriptors(const pcl::PointCloud<pcl::PointXYZI>::Ptr cloud)

@@ -31,21 +31,24 @@ public:
 
         Eigen::Matrix4f T_cam0_velo_eigen; // transformation matrix that transforms from the lidar frame to the camera_0 frame
         T_cam0_velo_eigen << 
-        4.276802e-04, -9.999672e-01, -8.084492e-03, -1.198460e-02,
-        -7.210627e-03,  8.081198e-03, -9.999413e-01, -5.403985e-02,
-        9.999739e-01,  4.859486e-04, -7.206934e-03, -2.921969e-01,
-        0, 0, 0, 1;
+            4.276802e-04, -9.999672e-01, -8.084492e-03, -1.198460e-02,
+            -7.210627e-03,  8.081198e-03, -9.999413e-01, -5.403985e-02,
+            9.999739e-01,  4.859486e-04, -7.206934e-03, -2.921969e-01,
+            0, 0, 0, 1;
 
         Sophus::SE3f T_cam0_velo(T_cam0_velo_eigen);
 
+        // read names of point clouds
         point_clouds_names = get_filenames("/media/dino/T7/data_odometry_lidar/sequences/00/velodyne");
 
         // read ground truth poses
         ground_truth_poses = read_ground_truth("/media/dino/T7/data_odometry_poses/dataset/poses/00.txt", T_cam0_velo);
-
+        
         point_cloud_next = read_ponint_cloud(point_clouds_names[0]);
         for (int i = 0; i < point_clouds_names.size() && rclcpp::ok(); i++)
         {   
+            std::cout << "Iteration: " << i+1 << " / " << point_clouds_names.size() << std::endl;
+
             point_cloud_prev = point_cloud_next;
             point_cloud_next = read_ponint_cloud(point_clouds_names[i]);
             auto stamp = this->get_clock()->now();
@@ -65,7 +68,8 @@ public:
             // );
 
             // auto T = icp.ransac(matched_points, 50, 0.25f);
-
+            
+            // run pcl ICP implementation
             pcl::IterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI> icp_pcl;
             icp_pcl.setInputSource(point_cloud_1);
             icp_pcl.setInputTarget(point_cloud_2);
@@ -107,8 +111,8 @@ public:
 
             Sophus::SE3f T_curr_prev(T); // transformation from the prev to the curr point cloud
             estimated_relative_poses.push_back(T_curr_prev.matrix());
-            T_wp = T_wp * T_curr_prev.inverse();
-            estimated_global_poses.push_back(T_wp.matrix());
+            T_wp = T_wp * T_curr_prev.inverse(); // pose of the current frame in the world frame
+            estimated_global_poses.push_back(T_wp.matrix()); 
 
             std::cout << "PCL estimated transformation matrix: \n" << T_wp_pcl.matrix3x4() << std::endl;
             std::cout << "Estimated transformation matrix: \n" << T_wp.matrix3x4() << std::endl;
@@ -119,11 +123,12 @@ public:
             publish_trajectory(stamp, ground_truth_traj_pub, ground_truth_poses, estimated_global_poses.size(), std::vector<float>{0.0, 0.0, 1.0});
             publish_trajectory(stamp, pcl_estimated_traj_pub, pcl_estimated_global_poses, pcl_estimated_global_poses.size(), std::vector<float>{0.0, 1.0, 0.0});
         
-
-        sensor_msgs::msg::PointCloud2 msg = point_cloud_to_message(point_cloud_next);
-        msg.header.stamp = stamp;
-        point_cloud_pub->publish(msg);
+            sensor_msgs::msg::PointCloud2 msg = point_cloud_to_message(point_cloud_next);
+            msg.header.stamp = stamp;
+            point_cloud_pub->publish(msg);
         }
+
+        store_estimated_trajectory(estimated_global_poses, T_cam0_velo);
     }
 
 private:
