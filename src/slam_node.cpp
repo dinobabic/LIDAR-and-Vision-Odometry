@@ -4,7 +4,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
-    #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
@@ -14,6 +14,7 @@
 #include <chrono>
 
 const std::string dataset_path = "/media/dino/T7/data_odometry_gray/dataset/sequences/00";
+const std::string dataset_path_color = "/media/dino/T7/data_odometry_color/dataset/sequences/00/image_2/";
 
 
 class SLAMNode : public rclcpp::Node
@@ -56,22 +57,54 @@ public:
 
         // load first stereo pair
         stereo_pair_curr = load_stereo_pair(dataset_path, image_names[0]);
-        for (int i = 1; i < N; i++) 
+        for (int i = 1; i < N && rclcpp::ok(); i++) 
         {
+            std::cout << "Iteration " << i << " / " << N << std::endl;
             stereo_pair_prev = stereo_pair_curr;
             stereo_pair_curr = load_stereo_pair(dataset_path, image_names[i]);
+            
+            // vision odometry
+            // auto T = estimated_poses.back();
+            // std::vector<Eigen::Vector3f> _points3D; // points3D expressed in the corresponding camera frame, not in the world frame
+            // slam.vision_odometry(stereo_pair_prev, stereo_pair_curr, T, _points3D);
+            // estimated_poses.push_back(T);
 
-            auto T = estimated_poses.back();
-            std::vector<Eigen::Vector3f> _points3D;
-            slam.vision_odometry(stereo_pair_prev, stereo_pair_curr, T, _points3D);
-            estimated_poses.push_back(T);
+            // // project 3D points onto the left camera to get colors
+            // // read left RGB image
+            // auto img_left = read_rgb(dataset_path_color + image_names[i]);
+            // std::vector<Eigen::Vector3f> _colors; // color of each 3D point
+            // project_points(img_left, _points3D, _colors, K);
+
+            // points3D.insert(points3D.end(), _points3D.begin(), _points3D.end());
+            // colors.insert(colors.end(), _colors.begin(), _colors.end());
+
+            // slam
+            std::vector<Eigen::Vector3f> new_points3D; // points3D expressed in the world frame
+            slam.slam(stereo_pair_prev, stereo_pair_curr, points3D, new_points3D, estimated_poses);
+            
+            // project 3D points onto the left camera to get colors
+            // read left RGB image
+            auto img_left = read_rgb(dataset_path_color + image_names[i]);
+            std::vector<Eigen::Vector3f> _colors; // color of each 3D point
+            project_points(img_left, new_points3D, _colors, K, estimated_poses[estimated_poses.size()-2]);
+            colors.insert(colors.end(), _colors.begin(), _colors.end());
+            
+
+            std::cout << "Estimated pose: \n" << estimated_poses.back().matrix() << std::endl;
+            std::cout << "Ground truth pose: \n" << ground_truth_poses[i].matrix() << std::endl;
 
             auto stamp = this->get_clock()->now();
             publish_transform(estimated_poses.back().matrix(), "map", "camera_frame", stamp);
             publish_trajectory(stamp, estimated_traj_pub, estimated_poses, estimated_poses.size(), std::vector<float>{1.0, 0.0, 0.0});
             publish_trajectory(stamp, ground_truth_traj_pub, ground_truth_poses, i, std::vector<float>{0.0, 0.0, 1.0});
-            //point_cloud_pub->publish(point_cloud_to_message(points3D));
+            point_cloud_pub->publish(point_cloud_to_message(points3D, colors));
+            
+            if (i==100)
+                break;
         }
+
+        std::cout << "Storing the estiamted trajectory" << std::endl;
+        store_estimated_trajectory(estimated_poses);
     }
 
 private:
@@ -90,15 +123,19 @@ private:
     Eigen::Matrix<float, 3, 4>  P0, P1; // projection matrices of the left and right camera
     Eigen::Matrix3f K; // calibration matrix of both cameras
     std::vector<Eigen::Vector3f> points3D;
+    std::vector<Eigen::Vector3f> colors;
     std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>> estimated_poses;
     std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>> ground_truth_poses;
 
 
-    sensor_msgs::msg::PointCloud2 point_cloud_to_message(const std::vector<Eigen::Vector3f>& point_cloud)
+    sensor_msgs::msg::PointCloud2 point_cloud_to_message(const std::vector<Eigen::Vector3f>& points3D,
+                                                        const std::vector<Eigen::Vector3f>& colors)
     {
         sensor_msgs::msg::PointCloud2 msg;
         msg.height = 1;
-        msg.width = point_cloud.size();
+        msg.width = points3D.size();
+        msg.is_dense = true;
+        msg.is_bigendian = false;
         msg.header.frame_id = "map"; // points are expressed in lidars local coordinate frame
         msg.header.stamp = this->get_clock()->now();
 
@@ -108,22 +145,33 @@ private:
             "x", 1, sensor_msgs::msg::PointField::FLOAT32,
             "y", 1, sensor_msgs::msg::PointField::FLOAT32,
             "z", 1, sensor_msgs::msg::PointField::FLOAT32,
-            "intensity", 1, sensor_msgs::msg::PointField::FLOAT32
+            "rgb", 1, sensor_msgs::msg::PointField::FLOAT32
         );
 
-        modifier.resize(point_cloud.size());
+        modifier.resize(points3D.size());
 
         sensor_msgs::PointCloud2Iterator<float> it_x(msg, "x");
         sensor_msgs::PointCloud2Iterator<float> it_y(msg, "y");
         sensor_msgs::PointCloud2Iterator<float> it_z(msg, "z");
-        sensor_msgs::PointCloud2Iterator<float> it_i(msg, "intensity");
+        sensor_msgs::PointCloud2Iterator<uint8_t> it_r(msg, "r");
+        sensor_msgs::PointCloud2Iterator<uint8_t> it_g(msg, "g");
+        sensor_msgs::PointCloud2Iterator<uint8_t> it_b(msg, "b");
 
-        for (const auto& p : point_cloud) {
+        for (int i = 0; i < points3D.size(); i++) 
+        {
+            auto p = points3D[i];
+            auto c = colors[i];
+
             *it_x = p[0];
             *it_y = p[1];
             *it_z = p[2];
-            *it_i = 1.0;//p.intensity;
-            ++it_x; ++it_y; ++it_z; ++it_i;
+
+            *it_r = static_cast<uint8_t>(std::clamp(c[0] * 255.f, 0.f, 255.f));
+            *it_g = static_cast<uint8_t>(std::clamp(c[1] * 255.f, 0.f, 255.f));
+            *it_b = static_cast<uint8_t>(std::clamp(c[2] * 255.f, 0.f, 255.f));
+
+            ++it_x; ++it_y; ++it_z;
+            ++it_r; ++it_g; ++it_b;
         }
 
         return msg;

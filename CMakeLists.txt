@@ -89,6 +89,22 @@ ament_target_dependencies(slam_node
 install(TARGETS slam_node DESTINATION lib/${PROJECT_NAME})
 
 
+add_executable(train_vocab
+    src/train_vocab.cpp
+)
+
+target_include_directories(train_vocab PRIVATE
+    /usr/local/include  
+    ${OpenCV_INCLUDE_DIRS}
+)
+
+target_link_libraries(train_vocab
+    DBoW2
+    ${OpenCV_LIBS}
+)
+
+install(TARGETS train_vocab DESTINATION lib/${PROJECT_NAME})
+
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

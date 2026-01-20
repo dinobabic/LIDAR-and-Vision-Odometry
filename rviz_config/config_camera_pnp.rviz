@@ -5,8 +5,7 @@ Panels:
     Property Tree Widget:
       Expanded:
         - /Global Options1
-        - /Status1
-        - /PointCloud21
+        - /TF1
         - /Marker1/Status1
         - /Marker1/Topic1
       Splitter Ratio: 0.5029411911964417
@@ -39,18 +38,18 @@ Visualization Manager:
       Frame Timeout: 15
       Frames:
         All Enabled: true
-        lidar_frame:
+        camera_frame:
           Value: true
         map:
           Value: true
-      Marker Scale: 1
+      Marker Scale: 15
       Name: TF
       Show Arrows: true
       Show Axes: true
       Show Names: false
       Tree:
         map:
-          lidar_frame:
+          camera_frame:
             {}
       Update Interval: 0
       Value: true
@@ -91,7 +90,7 @@ Visualization Manager:
       Enabled: true
       Name: Marker
       Namespaces:
-        {}
+        "": true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -104,20 +103,7 @@ Visualization Manager:
       Enabled: true
       Name: Marker
       Namespaces:
-        {}
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: pcl_estimated_trajectory
-      Value: true
-    - Class: rviz_default_plugins/Marker
-      Enabled: true
-      Name: Marker
-      Namespaces:
-        {}
+        "": true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -171,21 +157,26 @@ Visualization Manager:
   Value: true
   Views:
     Current:
-      Angle: 0.009999999776482582
-      Class: rviz_default_plugins/TopDownOrtho
+      Class: rviz_default_plugins/ThirdPersonFollower
+      Distance: 186.26219177246094
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Scale: 6.814720153808594
+      Pitch: 0.844796895980835
       Target Frame: <Fixed Frame>
-      Value: TopDownOrtho (rviz_default_plugins)
-      X: 0
-      Y: 0
+      Value: ThirdPersonFollower (rviz_default_plugins)
+      Yaw: 2.009225845336914
     Saved: ~
 Window Geometry:
   Displays:

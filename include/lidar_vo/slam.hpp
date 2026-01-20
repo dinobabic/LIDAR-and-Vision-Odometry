@@ -21,6 +21,7 @@ public:
 
     void slam(const StereoPair &stereo_pair_prev, const StereoPair &stereo_pair_curr, 
                 std::vector<Eigen::Vector3f> &all_points3D,  
+                std::vector<Eigen::Vector3f> &points3D_new,  
                 std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>>& camera_poses)
     {
         // for each image initialize ImageDescription
@@ -41,7 +42,7 @@ public:
         filter_stereo_matches(imgd_pl, imgd_pr);
         filter_temporal_matches(imgd_pl, imgd_cl);
 
-        // triangulate stereo matches-
+        // triangulate stereo matches
         std::vector<cv::Point2f> points2D;
         std::vector<Eigen::Vector3f> _points3D;
 
@@ -64,6 +65,7 @@ public:
         Eigen::Vector3f t;
         cv::Mat inliers_mask;
         PnP(_points3D, points2D, R, t, inliers_mask);
+        camera_poses.push_back(camera_poses.back() * Sophus::SE3f(R, t).inverse());
 
         // store all inlier 3D points as observations
         auto T_wp = camera_poses.back().matrix3x4(); // pose of the prev camera frame in the world
@@ -77,7 +79,8 @@ public:
                 Eigen::Vector3f pt_world = T_wp * pt_cam_h;
                 
                 all_points3D.push_back(pt_world);
-                observations_curr.push_back({camera_poses.size()-1, all_points3D.size()-1, {points2D[i].x, points2D[i].y}});
+                points3D_new.push_back(pt_world);
+                observations_curr.push_back({camera_poses.size(), all_points3D.size()-1, {points2D[i].x, points2D[i].y}});
             }
         }
 
@@ -88,48 +91,33 @@ public:
         {
             int start_idx = camera_poses.size() - window_size;
             std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>> window_poses(camera_poses.begin() + start_idx, camera_poses.end());
+            std::vector<std::vector<Observation>> _window_observations(observations.begin() + start_idx, observations.end());
 
-            std::unordered_map<int, int> cam_idx_map;
-            for (int i = 0; i < window_size; ++i)
-                cam_idx_map[start_idx + i] = i;
-                
-            std::vector<Eigen::Vector3f> window_points;
             std::vector<Observation> window_observations;
-            std::unordered_map<int, int> point_idx_map;
-            
-            for (int cam_global_idx = start_idx; cam_global_idx < camera_poses.size(); ++cam_global_idx) {
-                for (const auto &obs : observations[cam_global_idx]) {
-                    if (point_idx_map.find(obs.point3D_idx) == point_idx_map.end()) {
-                        point_idx_map[obs.point3D_idx] = window_points.size();
-                        window_points.push_back(all_points3D[obs.point3D_idx]);
-                    }
-
-                    Observation local_obs;
-                    local_obs.camera_id = cam_idx_map[cam_global_idx]; 
-                    local_obs.point3D_idx = point_idx_map[obs.point3D_idx];
-                    local_obs.p = obs.p;
-                    window_observations.push_back(local_obs);
-                }
+            for (const auto &inner : _window_observations) {
+                window_observations.insert(window_observations.end(), inner.begin(), inner.end());
             }
 
             std::cout << "Last pose before bundle adjustment: \n" << window_poses[2].matrix() << std::endl;
-            solve_bundle_adjustment(window_poses, window_points, window_observations, K);
+            solve_bundle_adjustment(window_poses, all_points3D, window_observations, K);
             std::cout << "Last pose after bundle adjustment: \n" << window_poses[2].matrix() << std::endl;
             
             for (int i = start_idx; i < camera_poses.size(); i++)
                 camera_poses[i] = window_poses[i-start_idx];
-        }
+        }   
 
-        camera_poses.push_back(camera_poses.back() * Sophus::SE3f(R, t).inverse());
+        points3D_new.assign(
+            all_points3D.end() - points3D_new.size(),
+            all_points3D.end()
+        );
 
-        visualize_matches(stereo_pair_prev.left, stereo_pair_prev.right, imgd_pl, imgd_pr);
-        int key = cv::waitKey(30);
-        if (key == 27)
-        {
-            cv::destroyAllWindows();
-            exit(0);
-        }
-    
+        // visualize_matches(stereo_pair_prev.left, stereo_pair_prev.right, imgd_pl, imgd_pr);
+        // int key = cv::waitKey(30);
+        // if (key == 27)
+        // {
+        //     cv::destroyAllWindows();
+        //     exit(0);
+        // }
     }
 
     void vision_odometry(const StereoPair &stereo_pair_prev, const StereoPair &stereo_pair_curr, 
@@ -149,7 +137,8 @@ public:
         detect_features(stereo_pair_prev.right, imgd_pr);
         match_features_stereo(imgd_pl, imgd_pr);
 
-        // filter first stereo matches and then temporal matches
+        // filter stereo matches by ensuring positive depth and epipolar constraint
+        // thereafter filter temporal matches
         filter_stereo_matches(imgd_pl, imgd_pr);
         filter_temporal_matches(imgd_pl, imgd_cl);
 
@@ -176,13 +165,13 @@ public:
         PnP(points3D, points2D, R, t, inliers_mask);
         T = T * Sophus::SE3f(R, t).inverse();
 
-        visualize_matches(stereo_pair_prev.left, stereo_pair_prev.right, imgd_pl, imgd_pr);
-        int key = cv::waitKey(30);
-        if (key == 27)
-        {
-            cv::destroyAllWindows();
-            exit(0);
-        }
+        // visualize_matches(stereo_pair_prev.left, stereo_pair_prev.right, imgd_pl, imgd_pr);
+        // int key = cv::waitKey(30);
+        // if (key == 27)s
+        // {
+        //     cv::destroyAllWindows();
+        //     exit(0);
+        // }
     }
 
 private:

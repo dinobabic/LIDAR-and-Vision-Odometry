@@ -76,12 +76,50 @@ std::vector<std::string> get_filenames(const std::string &path)
 
     for (const auto &entry : std::filesystem::directory_iterator(path)) {
         if (entry.is_regular_file()) {
-            filenames.push_back(entry.path().filename().string());
+            //filenames.push_back(path + entry.path().filename().string()); // for train vocab
+            filenames.push_back(entry.path().filename().string()); // for slam node
         }
     }
 
     std::sort(filenames.begin(), filenames.end());
     return filenames;
+}
+
+// used in train_vocab.cpp
+std::vector<cv::Mat> load_imgs(const std::vector<std::string> &image_names)
+{
+    std::vector<cv::Mat> imgs;
+    for (const auto &img_name : image_names)
+        imgs.push_back(cv::imread(img_name, cv::IMREAD_GRAYSCALE));
+    return imgs;
+}
+
+cv::Mat read_rgb(const std::string &path)
+{
+    return cv::imread(path, cv::IMREAD_COLOR);
+}
+
+// used in train_vocab.cpp
+std::vector<std::vector<cv::Mat>> get_image_descriptors(const std::vector<cv::Mat> &imgs)
+{
+    std::vector<std::vector<cv::Mat>> descriptors;
+    descriptors.reserve(imgs.size());
+
+    for (const auto &img : imgs) 
+    {
+        std::vector<cv::KeyPoint> keypoints;
+        cv::Mat descriptor;
+        detector->detectAndCompute(img, cv::Mat(), keypoints, descriptor);
+        
+        // descriptor is a matrix of size (N x descriptor_size)
+        // DBoW2 wants a vector of descriptors each stored as a separate cv::Mat
+        std::vector<cv::Mat> descriptors_img;
+        for (size_t i = 0; i < descriptor.rows; i++)
+            descriptors_img.push_back(descriptor.row(i));
+        descriptors.push_back(descriptors_img);
+    }
+
+    return descriptors;
 }
 
 std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>> read_ground_truth(const std::string &path)
@@ -344,3 +382,58 @@ void visualize_matches(const cv::Mat &img1, const cv::Mat &img2,
     cv::resize(img_matches, img_matches, cv::Size(), 0.7, 0.7);
     cv::imshow("Matches", img_matches);
 }
+
+void store_estimated_trajectory(const std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>>& poses_cam_world) 
+{
+    std::ofstream out("/home/dino/3dvid/lidar_visual_odometry_ws/src/lidar_vo/trajectories/00_estimate_camera.txt");
+    if (!out.is_open()) return;
+
+    for (const auto& T_w_cam : poses_cam_world)
+    {
+        auto _T_w_cam = T_w_cam.matrix3x4();
+        out << std::fixed << std::setprecision(9);
+        out << _T_w_cam(0,0) << " " << _T_w_cam(0,1) << " " << _T_w_cam(0,2) << " " << _T_w_cam(0,3) << " "
+            << _T_w_cam(1,0) << " " << _T_w_cam(1,1) << " " << _T_w_cam(1,2) << " " << _T_w_cam(1,3) << " "
+            << _T_w_cam(2,0) << " " << _T_w_cam(2,1) << " " << _T_w_cam(2,2) << " " << _T_w_cam(2,3)
+            << "\n";
+    }
+    out.close();
+}
+
+void project_points(const cv::Mat &img, const std::vector<Eigen::Vector3f> &points3D,
+                    std::vector<Eigen::Vector3f> &colors, Eigen::Matrix3f K,
+                    const std::optional<Sophus::SE3f> &T_w = std::nullopt)
+{
+    auto f = K(0,0);
+    auto cx = K(0,2);
+    auto cy = K(1,2);
+
+    colors.reserve(points3D.size());
+
+    for (auto pt3D : points3D)
+    {
+        Eigen::Vector3f pt_cam = pt3D;
+
+        // if T_w is provided, transform point into camera frame
+        if (T_w.has_value()) 
+            pt_cam = T_w->inverse() * pt3D;        
+
+        int x = static_cast<int>((pt_cam[0] / pt_cam[2]) * f + cx);
+        int y = static_cast<int>((pt_cam[1] / pt_cam[2]) * f + cy); 
+        
+        if (x < 0 || x >= img.cols || y < 0 || y >= img.rows)
+        {
+            colors.emplace_back(0.0, 0.0, 0.0); // black point
+            continue;
+        }
+
+        const cv::Vec3b &bgr = img.at<cv::Vec3b>(y, x);
+
+        float r = bgr[2] / 255.0f;
+        float g = bgr[1] / 255.0f;
+        float b = bgr[0] / 255.0f;
+
+        colors.emplace_back(r, g, b);
+    }
+}
+

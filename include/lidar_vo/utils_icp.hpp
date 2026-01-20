@@ -123,7 +123,7 @@ void store_estimated_trajectory(
         poses_cam0_world.push_back(T_w_cam0);
     }
 
-    std::ofstream out("/home/dino/3dvid/lidar_visual_odometry_ws/src/lidar_vo/estimates/00_estimate_lidar.txt");
+    std::ofstream out("/home/dino/3dvid/lidar_visual_odometry_ws/src/lidar_vo/trajectories/00_estimate_lidar.txt");
     if (!out.is_open()) return;
 
     for (const auto& T_w_cam0 : poses_cam0_world)
