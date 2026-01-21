@@ -119,8 +119,8 @@ public:
 void solve_bundle_adjustment(
     std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>>& camera_poses,
     std::vector<Eigen::Vector3f> &points3D,
-    std::vector<Observation> observations,
-    Eigen::Matrix3f K
+    const std::vector<Observation> &observations,
+    const Eigen::Matrix3f &K
 )
 {
     typedef g2o::BlockSolver<g2o::BlockSolverTraits<6, 3>> BlockSolverType;
@@ -133,8 +133,6 @@ void solve_bundle_adjustment(
     optimizer.setAlgorithm(solver);
     optimizer.setVerbose(false);
 
-    std::vector<VertexPose*> vertex_pose;
-    std::vector<VertexPoint*> vertex_points;
 
     // add alll cameras to the optimization problem
     size_t i = 0;
@@ -146,54 +144,62 @@ void solve_bundle_adjustment(
             Sophus::SO3f(camera_poses[i].inverse().rotationMatrix()),
             camera_poses[i].inverse().translation() 
         ));
-        
+
+        if (i == 0) v->setFixed(true);
         optimizer.addVertex(v);
-        vertex_pose.push_back(v);
     }
 
     // add all points to the optimization problem
-    for (size_t j = 0; j < points3D.size(); j++)
+    std::unordered_map<int, VertexPoint*> point_vertex_map;
+    int vertex_id_counter = camera_poses.size();
+
+    for (const auto& obs : observations)
     {
-        VertexPoint *v = new VertexPoint();
-        v->setId(i+j);
-        v->setEstimate(points3D[j]);
-        v->setMarginalized(true); // every point needs to be marginlized for efficiency
-        optimizer.addVertex(v);
-        vertex_points.push_back(v);
+        if (point_vertex_map.find(obs.point3D_idx) == point_vertex_map.end())
+        {
+            VertexPoint *v = new VertexPoint();
+            v->setId(vertex_id_counter++);
+            v->setEstimate(points3D[obs.point3D_idx]);
+            v->setMarginalized(true);
+            optimizer.addVertex(v);
+            point_vertex_map[obs.point3D_idx] = v;
+        }
     }
 
-    // connect vertices with edges for each observation
-    int start_cam_idx = observations[0].camera_id;
-    for (i = 0; i < observations.size(); i++)
+    // add edges
+    i = 0;
+    for (const auto& obs : observations)
     {
-        auto observation = observations[i];
-        int local_cam_idx = observation.camera_id - start_cam_idx;
+        int local_cam_idx = obs.camera_id; 
 
         EdgeProjection *edge = new EdgeProjection();
-        edge->setVertex(0, vertex_pose[local_cam_idx]);
-        edge->setVertex(1, vertex_points[observation.point3D_idx]);
-        edge->setMeasurement(observation.p);
+        edge->setVertex(0, optimizer.vertex(local_cam_idx));
+        edge->setVertex(1, point_vertex_map[obs.point3D_idx]);
+        edge->setMeasurement(obs.p);
         edge->setInformation(Eigen::Matrix2d::Identity());
         edge->setRobustKernel(new g2o::RobustKernelHuber());
         optimizer.addEdge(edge);
+
+        edge->computeError();
+        if (i % 500 == 0) std::cout << "Initial Error for edge " << i << ": " << edge->error().norm() << std::endl;
+        i++;
     }
 
     optimizer.initializeOptimization();
-    optimizer.setVerbose(true);
+    optimizer.setVerbose(false);
     optimizer.optimize(4);
 
     // update optimized variables
-    for (i = 0; i < vertex_pose.size(); i++)
+    for (size_t i = 0; i < camera_poses.size(); i++)
     {
-        auto v = vertex_pose[i];
-        auto estimate = v->estimate();
-        camera_poses[i] = Sophus::SE3f(estimate.R, estimate.t).inverse();
+        VertexPose* v = static_cast<VertexPose*>(optimizer.vertex(i));
+        auto est = v->estimate();
+        camera_poses[i] = Sophus::SE3f(est.R, est.t).inverse();
     }
 
-    for (i = 0; i < vertex_points.size(); i++)
+    for (auto const& [global_idx, v_ptr] : point_vertex_map)
     {
-        auto v = vertex_points[i];
-        points3D[i] = v->estimate();
+        points3D[global_idx] = v_ptr->estimate();
     }
 }
 

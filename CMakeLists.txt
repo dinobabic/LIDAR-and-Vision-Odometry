@@ -88,6 +88,30 @@ ament_target_dependencies(slam_node
 
 install(TARGETS slam_node DESTINATION lib/${PROJECT_NAME})
 
+add_executable(vision_odometry_node
+    src/vision_odometry_node.cpp
+)
+
+target_link_libraries(vision_odometry_node
+    Eigen3::Eigen
+    ${OpenCV_LIBS}
+    Sophus::Sophus
+    ${G2O_LIBS}
+    ${PCL_LIBRARIES}
+)
+
+ament_target_dependencies(vision_odometry_node
+    rclcpp
+    sensor_msgs
+    std_msgs
+    geometry_msgs
+    tf2
+    tf2_ros
+    visualization_msgs
+)
+
+install(TARGETS vision_odometry_node DESTINATION lib/${PROJECT_NAME})
+
 
 add_executable(train_vocab
     src/train_vocab.cpp

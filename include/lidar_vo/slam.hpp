@@ -19,105 +19,106 @@ public:
                 K_cv.at<float>(r, c) = K(r, c);
     }
 
-    void slam(const StereoPair &stereo_pair_prev, const StereoPair &stereo_pair_curr, 
-                std::vector<Eigen::Vector3f> &all_points3D,  
-                std::vector<Eigen::Vector3f> &points3D_new,  
-                std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>>& camera_poses)
+    void initialize_keyframe(const int camera_id, const StereoPair &stereo_pair, const Sophus::SE3f &T)
     {
-        // for each image initialize ImageDescription
-        ImageDescription imgd_cl, imgd_cr, imgd_pl, imgd_pr;
-        imgd_cl.img_id = "cl"; // current left
-        imgd_cr.img_id = "cr"; // current right
-        imgd_pl.img_id = "pl"; // previous left
-        imgd_pr.img_id = "pr"; // previous right
+        // initialize keyframe - detect matches in the left and right image, match them and triangulate
+        std::vector<Eigen::Vector3f> new_points3D;
+        match_and_triangulate(stereo_pair, keyframe, K, baseline);
+        new_points3D.insert(new_points3D.end(), keyframe.points3D.begin(), keyframe.points3D.end());
 
-        // detect matches between the current left image and the current right image
-        detect_and_match_temporal(stereo_pair_prev.left, stereo_pair_curr.left, imgd_pl, imgd_cl);
+        auto img_left = read_rgb(dataset_path_color + image_names[camera_id]);
+        std::vector<Eigen::Vector3f> _colors; // color of each 3D point
+        project_points(img_left, new_points3D, _colors, K);
 
-        // detect matches between the previous left and the previous right image - only for the features that have been matched in the previous left
-        detect_features(stereo_pair_prev.right, imgd_pr);
-        match_features_stereo(imgd_pl, imgd_pr);
+        colors.insert(colors.end(), _colors.begin(), _colors.end());
+        //points3D.insert(points3D.end(), new_points3D.begin(), new_points3D.end()); 
 
-        // filter first stereo matches and then temporal matches
-        filter_stereo_matches(imgd_pl, imgd_pr);
-        filter_temporal_matches(imgd_pl, imgd_cl);
-
-        // triangulate stereo matches
-        std::vector<cv::Point2f> points2D;
-        std::vector<Eigen::Vector3f> _points3D;
-
-        auto points3D_map = triangulate(imgd_pl, imgd_pr);
-
-        for (int kp_idx_cl = 0; kp_idx_cl < imgd_cl.kps.size(); kp_idx_cl++)
+        keyframe_points_to_global_points.clear();
+        for (int i = 0; i < new_points3D.size(); i++)
         {
-            for (const auto &m_cl : imgd_cl.matches_per_kp[kp_idx_cl])
-            {
-                int idx_pl = m_cl.kp_idx_other;
-                if (points3D_map.count(idx_pl))
-                { 
-                    _points3D.push_back(points3D_map[idx_pl]);
-                    points2D.push_back(imgd_cl.kps[m_cl.kp_idx_this].pt);
-                }
-            }
+            keyframe_points_to_global_points[i] = points3D.size();
+            points3D.push_back(T * new_points3D[i]);
+        }
+
+        // initialize observations
+        for (int i = 0; i < keyframe.kps.size(); i++)
+        {
+            auto pt2d = keyframe.kps[i].pt;
+            observations.push_back(Observation(camera_id, keyframe_points_to_global_points[i], {pt2d.x, pt2d.y}));
+        }
+    }
+
+
+    void keyframe_motion(const int camera_id, const StereoPair &stereo_pair_prev, const StereoPair &stereo_pair_curr,
+                        std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>> &estimated_poses)
+    {
+        auto T = estimated_poses.back();
+
+        std::vector<cv::Point2f> matched_points2D;
+        std::vector<Eigen::Vector3f> matched_points3D;
+        std::vector<int> matched_kf_indices;
+        match_against_keyframe(keyframe, stereo_pair_curr.left, matched_points3D, matched_points2D, matched_kf_indices);
+        
+        if (1.0f*matched_points2D.size() / keyframe.kps.size() < 1.0)
+        {
+            // make the previous frame the keyframe and recompute 2d-3d correspondances for better ratio
+            std::cout << "Initializing new keyframe" << std::endl;
+            initialize_keyframe(camera_id-1, stereo_pair_prev, T);
+
+            matched_points2D.clear();
+            matched_points3D.clear();
+            matched_kf_indices.clear();
+            match_against_keyframe(keyframe, stereo_pair_curr.left, matched_points3D, matched_points2D, matched_kf_indices);
         }
 
         Eigen::Matrix3f R;
         Eigen::Vector3f t;
         cv::Mat inliers_mask;
-        PnP(_points3D, points2D, R, t, inliers_mask);
-        camera_poses.push_back(camera_poses.back() * Sophus::SE3f(R, t).inverse());
+        PnP(matched_points3D, matched_points2D, R, t, inliers_mask);
+        estimated_poses.push_back(T * Sophus::SE3f(R, t).inverse());
 
-        // store all inlier 3D points as observations
-        auto T_wp = camera_poses.back().matrix3x4(); // pose of the prev camera frame in the world
-        std::vector<Observation> observations_curr;
-        for (int i = 0; i < _points3D.size(); i++)
+        // initialize observations
+        for (int i = 0; i < matched_points2D.size(); i++)
         {
-            if (inliers_mask.at<uchar>(i)) 
+            if (inliers_mask.at<uchar>(i))
             {
-                Eigen::Vector3f pt_cam = _points3D[i]; 
-                Eigen::Vector4f pt_cam_h(pt_cam(0), pt_cam(1), pt_cam(2), 1.0f);
-                Eigen::Vector3f pt_world = T_wp * pt_cam_h;
+                int local_idx = matched_kf_indices[i];
+                int global_idx = keyframe_points_to_global_points[local_idx];
+                auto pt2d = matched_points2D[i];
                 
-                all_points3D.push_back(pt_world);
-                points3D_new.push_back(pt_world);
-                observations_curr.push_back({camera_poses.size(), all_points3D.size()-1, {points2D[i].x, points2D[i].y}});
+                observations.push_back(Observation(camera_id, global_idx, {pt2d.x, pt2d.y}));
             }
         }
 
-        observations.push_back(observations_curr);
+        std::cout << "The number of observations is: " << observations.size() << std::endl;
 
-        int window_size = 3;
-        if (camera_poses.size() > window_size)
+        // perform bundle adjustment
+        return;
+        if (camera_id >= 3)
         {
-            int start_idx = camera_poses.size() - window_size;
-            std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>> window_poses(camera_poses.begin() + start_idx, camera_poses.end());
-            std::vector<std::vector<Observation>> _window_observations(observations.begin() + start_idx, observations.end());
-
             std::vector<Observation> window_observations;
-            for (const auto &inner : _window_observations) {
-                window_observations.insert(window_observations.end(), inner.begin(), inner.end());
+            std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>> window_poses;
+
+            int start_idx = camera_id-3;
+            window_poses.insert(window_poses.begin(), estimated_poses.begin() + start_idx, estimated_poses.end());
+
+            for (auto it = observations.rbegin(); it != observations.rend(); ++it)
+            {
+                if (it->camera_id < start_idx) 
+                    break; 
+
+                Observation normalized_obs = *it;
+                normalized_obs.camera_id -= start_idx;
+                window_observations.push_back(normalized_obs);
             }
-
-            std::cout << "Last pose before bundle adjustment: \n" << window_poses[2].matrix() << std::endl;
-            solve_bundle_adjustment(window_poses, all_points3D, window_observations, K);
-            std::cout << "Last pose after bundle adjustment: \n" << window_poses[2].matrix() << std::endl;
             
-            for (int i = start_idx; i < camera_poses.size(); i++)
-                camera_poses[i] = window_poses[i-start_idx];
-        }   
+            std::cout << "Last pose before bundle adjustment: " << window_poses.back().matrix() << std::endl;
+            solve_bundle_adjustment(window_poses, points3D, window_observations, K);
+            std::cout << "Last pose after bundle adjustment: " << window_poses.back().matrix() << std::endl;
 
-        points3D_new.assign(
-            all_points3D.end() - points3D_new.size(),
-            all_points3D.end()
-        );
-
-        // visualize_matches(stereo_pair_prev.left, stereo_pair_prev.right, imgd_pl, imgd_pr);
-        // int key = cv::waitKey(30);
-        // if (key == 27)
-        // {
-        //     cv::destroyAllWindows();
-        //     exit(0);
-        // }
+            for (int i = 0; i < window_poses.size(); ++i) 
+                estimated_poses[start_idx + i] = window_poses[i];
+        }
     }
 
     void vision_odometry(const StereoPair &stereo_pair_prev, const StereoPair &stereo_pair_curr, 
@@ -174,12 +175,40 @@ public:
         // }
     }
 
+    void set_image_names(const std::vector<std::string> &_image_names)
+    {
+        image_names = _image_names;
+    }
+
+    void set_dataset_path_color(const std::string &_dataset_path_color)
+    {
+        dataset_path_color = _dataset_path_color;
+    }
+
+    std::vector<Eigen::Vector3f>& get_points3D()
+    {
+        return this->points3D;
+    }
+
+    std::vector<Eigen::Vector3f>& get_colors()
+    {
+        return this->colors;
+    }
+
 private:
     Eigen::Matrix3f K;
     cv::Mat K_cv;
     Eigen::Matrix<float, 3, 4> P0, P1;
     float baseline;
-    std::vector<std::vector<Observation>> observations;
+
+    std::vector<std::string> image_names;
+    std::string dataset_path_color;
+
+    std::vector<Eigen::Vector3f> points3D;
+    std::vector<Eigen::Vector3f> colors;
+    std::vector<Observation> observations;
+    Keyframe keyframe;
+    std::unordered_map<int, int> keyframe_points_to_global_points;
 
     std::map<int, Eigen::Vector3f> triangulate(const ImageDescription &imgd_pl, const ImageDescription &imgd_pr)
     {

@@ -16,16 +16,11 @@
 const std::string dataset_path = "/media/dino/T7/data_odometry_gray/dataset/sequences/00";
 const std::string dataset_path_color = "/media/dino/T7/data_odometry_color/dataset/sequences/00/image_2/";
 
-/*
-Publish this transform for visualization:
-    ros2 run tf2_ros static_transform_publisher 0 0 0 0.5 -0.5 0.5 0.5 map map_rotated
-*/
 
-
-class SLAMNode : public rclcpp::Node
+class VisionOdometryNode : public rclcpp::Node
 {
 public:
-    SLAMNode() : Node("slam_node"), index(0)
+    VisionOdometryNode() : Node("vision_odometry_node"), index(0)
     {   
         // initialize ROS2 publishers and transformation broadcaster
         point_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("points", 10);
@@ -55,9 +50,6 @@ public:
 
         // read file names and ground truth poses
         image_names = get_filenames(dataset_path + "/image_0");
-        slam.set_image_names(image_names);
-        slam.set_dataset_path_color(dataset_path_color);
-
         ground_truth_poses = read_ground_truth("/media/dino/T7/data_odometry_poses/dataset/poses/00.txt");
         int N = image_names.size();
 
@@ -65,17 +57,26 @@ public:
 
         // load first stereo pair
         stereo_pair_curr = load_stereo_pair(dataset_path, image_names[0]);
-
-        // initialize the first stereo pair as the keyframe
-        slam.initialize_keyframe(0, stereo_pair_curr, estimated_poses.back());
-
         for (int i = 1; i < N && rclcpp::ok(); i++) 
         {
             std::cout << "Iteration " << i << " / " << N << std::endl;
             stereo_pair_prev = stereo_pair_curr;
             stereo_pair_curr = load_stereo_pair(dataset_path, image_names[i]);
+            
+            // vision odometry
+            auto T = estimated_poses.back();
+            std::vector<Eigen::Vector3f> _points3D; // points3D expressed in the corresponding camera frame, not in the world frame
+            slam.vision_odometry(stereo_pair_prev, stereo_pair_curr, T, _points3D);
+            estimated_poses.push_back(T);
 
-            slam.keyframe_motion(i, stereo_pair_prev, stereo_pair_curr, estimated_poses);
+            // project 3D points onto the left camera to get colors
+            // read left RGB image
+            auto img_left = read_rgb(dataset_path_color + image_names[i]);
+            std::vector<Eigen::Vector3f> _colors; // color of each 3D point
+            project_points(img_left, _points3D, _colors, K);
+
+            points3D.insert(points3D.end(), _points3D.begin(), _points3D.end());
+            colors.insert(colors.end(), _colors.begin(), _colors.end());
 
             std::cout << "Estimated pose: \n" << estimated_poses.back().matrix() << std::endl;
             std::cout << "Ground truth pose: \n" << ground_truth_poses[i].matrix() << std::endl;
@@ -84,15 +85,14 @@ public:
             publish_transform(estimated_poses.back().matrix(), "map", "camera_frame", stamp);
             publish_trajectory(stamp, estimated_traj_pub, estimated_poses, estimated_poses.size(), std::vector<float>{1.0, 0.0, 0.0});
             publish_trajectory(stamp, ground_truth_traj_pub, ground_truth_poses, i, std::vector<float>{0.0, 0.0, 1.0});
-            point_cloud_pub->publish(point_cloud_to_message(slam.get_points3D(), slam.get_colors()));
+            point_cloud_pub->publish(point_cloud_to_message(points3D, colors));
             
             if (i==100)
-            {
-                std::cout << "Storing the estiamted trajectory" << std::endl;
-                store_estimated_trajectory(estimated_poses);
                 break;
-            }
         }
+
+        std::cout << "Storing the estimated trajectory" << std::endl;
+        store_estimated_trajectory(estimated_poses);
     }
 
 private:
@@ -110,6 +110,8 @@ private:
     SLAM slam;
     Eigen::Matrix<float, 3, 4>  P0, P1; // projection matrices of the left and right camera
     Eigen::Matrix3f K; // calibration matrix of both cameras
+    std::vector<Eigen::Vector3f> points3D;
+    std::vector<Eigen::Vector3f> colors;
     std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>> estimated_poses;
     std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>> ground_truth_poses;
 
@@ -220,7 +222,7 @@ private:
 int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<SLAMNode>());
+    rclcpp::spin(std::make_shared<VisionOdometryNode>());
     rclcpp::shutdown();
     return 0;
 }

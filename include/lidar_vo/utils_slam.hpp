@@ -61,6 +61,13 @@ struct Observation
     Eigen::Vector2f p;
 };
 
+struct Keyframe
+{
+    std::vector<cv::KeyPoint> kps;
+    cv::Mat descriptors;
+    std::vector<Eigen::Vector3f> points3D;
+};
+
 StereoPair load_stereo_pair(const std::string &path, const std::string &image_name)
 {
     std::cout << "Image path I am reading is " + path + "/image_0" + " and name is " + image_name << std::endl;
@@ -385,7 +392,7 @@ void visualize_matches(const cv::Mat &img1, const cv::Mat &img2,
 
 void store_estimated_trajectory(const std::vector<Sophus::SE3f, Eigen::aligned_allocator<Sophus::SE3f>>& poses_cam_world) 
 {
-    std::ofstream out("/home/dino/3dvid/lidar_visual_odometry_ws/src/lidar_vo/trajectories/00_estimate_camera.txt");
+    std::ofstream out("/home/dino/3dvid/lidar_visual_odometry_ws/src/lidar_vo/trajectories/00_estimate_camera_no_keyframe.txt");
     if (!out.is_open()) return;
 
     for (const auto& T_w_cam : poses_cam_world)
@@ -437,3 +444,79 @@ void project_points(const cv::Mat &img, const std::vector<Eigen::Vector3f> &poin
     }
 }
 
+
+// FUNCTIONS USED FOR SLAM
+void match_and_triangulate(const StereoPair &stereo_pair, Keyframe &keyframe, const Eigen::Matrix3f &K, const float baseline)
+{
+    std::vector<cv::KeyPoint> keypoints_left, keypoints_right;
+    cv::Mat descriptors_left, descriptors_right;
+    
+    detector->detectAndCompute(stereo_pair.left, cv::Mat(), keypoints_left, descriptors_left);
+    detector->detectAndCompute(stereo_pair.right, cv::Mat(), keypoints_right, descriptors_right);
+
+    std::vector<std::vector<cv::DMatch>> knn_matches;
+    bf.knnMatch(descriptors_left, descriptors_right, knn_matches, 2);
+
+    const float ratio_thresh = 0.75f;
+    std::vector<cv::DMatch> good_matches;
+    good_matches.reserve(knn_matches.size());
+    for (size_t i = 0; i < knn_matches.size(); i++)
+        if (knn_matches[i].size() == 2 && knn_matches[i][0].distance < ratio_thresh * knn_matches[i][1].distance)
+            good_matches.push_back(knn_matches[i][0]);
+
+    keyframe.kps.clear();
+    keyframe.descriptors.release();
+    keyframe.points3D.clear();
+
+
+    float fx = K(0,0); float fy = K(1, 1); float cx = K(0, 2); float cy = K(1,2);
+    for (const auto &match : good_matches)
+    {
+        auto pt_l = keypoints_left[match.queryIdx].pt;
+        auto pt_r = keypoints_right[match.trainIdx].pt;
+        
+        bool valid = (pt_l.x - pt_r.x > 0) && (std::abs(pt_l.y - pt_r.y) <= 2.0);
+        if (valid)
+        {
+            int idx = match.queryIdx;
+            keyframe.kps.push_back(keypoints_left[idx]);
+            keyframe.descriptors.push_back(descriptors_left.row(idx));
+            
+            float disparity = pt_l.x - pt_r.x;
+            float Z = (fx * baseline) / disparity;
+            float X = (pt_l.x - cx) * Z / fx;
+            float Y = (pt_l.y - cy) * Z / fy;
+
+            keyframe.points3D.push_back(Eigen::Vector3f(X, Y, Z));
+        }
+    }
+}
+
+void match_against_keyframe(const Keyframe& keyframe, const cv::Mat& img, 
+        std::vector<Eigen::Vector3f> &points3D, std::vector<cv::Point2f> &points2D, std::vector<int> &matched_kf_indices)
+{
+    std::vector<cv::KeyPoint> keypoints;
+    cv::Mat descriptors;
+    detector->detectAndCompute(img, cv::Mat(), keypoints, descriptors);
+
+    std::vector<std::vector<cv::DMatch>> knn_matches;
+    bf.knnMatch(descriptors, keyframe.descriptors, knn_matches, 2);
+
+    const float ratio_thresh = 0.75f;
+    int good_matches_count = 0;
+    for (size_t i = 0; i < knn_matches.size(); i++)
+        if (knn_matches[i].size() == 2 && knn_matches[i][0].distance < ratio_thresh * knn_matches[i][1].distance)
+        {
+            auto &match = knn_matches[i][0];
+            auto pt2d = keypoints[match.queryIdx].pt;
+            auto pt3d = keyframe.points3D[match.trainIdx];
+
+            points2D.push_back(pt2d);
+            points3D.push_back(pt3d);
+            matched_kf_indices.push_back(match.trainIdx);
+
+            good_matches_count++;
+        }
+    
+    std::cout << "number of matches / number of keypoints (keyframe): "<< good_matches_count << " / " << keyframe.kps.size() << std::endl;
+}
